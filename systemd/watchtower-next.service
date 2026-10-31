@@ -5,4 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# systemd user services get a minimal PATH. System dirs must come FIRST:
+# Homebrew shadows `podman` with its own build whose rootless defaults are
+# broken; brew's bin sits at the end only so `podman compose` can find the
+# podman-compose provider.
+Environment="PATH=%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin:/home/linuxbrew/.linuxbrew/bin"
 ExecStart=%h/git/watchtower-next/watchtower_next.py --config %h/git/watchtower-next/config.toml
