@@ -36,3 +36,20 @@ post_update_wait_seconds = 10
 # the original tag is moved back onto the old image and the project is
 # recreated on the previous version automatically.
 auto_rollback = true
+
+# After a project updates and verifies successfully, remove the ROLLBACK tag
+# so the superseded image becomes dangling and `podman image prune` can
+# reclaim it. Set to false to keep every rollback tag until the next run
+# re-tags it (uses more disk, slightly safer window).
+rollback_tag_cleanup = true
+
+# Projects whose images are built locally (podman build) and only change when
+# rebuilt. These skip the `pull` step entirely -- a registry pull would fail
+# -- while `up -d` still recreates containers whenever the image ID changed.
+# no_pull_projects = ["nginx"]
+
+# Before pulling, ask the registry (skopeo, manifest-only, no layers) whether
+# each image's digest actually changed; skip the pull when it did not.
+# Requires skopeo; if it is missing or fails, the run falls back to always
+# pulling. Set to false to always pull.
+digest_check = true

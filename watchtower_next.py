@@ -17,6 +17,7 @@ Behavior:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import re
 import shlex
@@ -34,6 +35,7 @@ DEFAULT_LOG_RETENTION_DAYS = 30
 DEFAULT_POST_UPDATE_WAIT_SECONDS = 10
 PULL_TIMEOUT_SECONDS = 1800
 UP_TIMEOUT_SECONDS = 600
+DIGEST_TIMEOUT_SECONDS = 120
 LOG_FILE_GLOB = "watchtower-next-*.log"
 
 CONTAINER_NAME_RE = re.compile(
@@ -62,6 +64,9 @@ class Config:
     log_retention_days: int
     post_update_wait_seconds: int
     auto_rollback: bool = False
+    rollback_tag_cleanup: bool = True
+    no_pull_projects: tuple[str, ...] = ()
+    digest_check: bool = True
     dry_run: bool = False
 
 
@@ -142,6 +147,9 @@ def load_config(config_file: Path, dry_run: bool) -> Config:
         raw.get("post_update_wait_seconds", DEFAULT_POST_UPDATE_WAIT_SECONDS)
     )
     auto_rollback = bool(raw.get("auto_rollback", False))
+    rollback_tag_cleanup = bool(raw.get("rollback_tag_cleanup", True))
+    no_pull_projects = tuple(str(p) for p in raw.get("no_pull_projects", []))
+    digest_check = bool(raw.get("digest_check", True))
 
     return Config(
         base_dir=base_dir,
@@ -152,6 +160,9 @@ def load_config(config_file: Path, dry_run: bool) -> Config:
         log_retention_days=log_retention_days,
         post_update_wait_seconds=post_update_wait_seconds,
         auto_rollback=auto_rollback,
+        rollback_tag_cleanup=rollback_tag_cleanup,
+        no_pull_projects=no_pull_projects,
+        digest_check=digest_check,
         dry_run=dry_run,
     )
 
@@ -268,6 +279,75 @@ def _log_result(label: str, result: subprocess.CompletedProcess[str]) -> None:
         log.debug("%s: %s", label, line)
 
 
+# --------------------------------------------------------------------------
+# Remote digest check
+# --------------------------------------------------------------------------
+
+
+def remote_image_digest(ref: str) -> str | None:
+    """Current digest of *ref* in its registry, via skopeo. ``None`` if unknown.
+
+    A read-only registry query (manifest only, no layers). ``None`` means the
+    check could not run or be trusted, and callers should fall back to pulling.
+    """
+    try:
+        result = subprocess.run(
+            ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{ref}"],
+            capture_output=True,
+            text=True,
+            timeout=DIGEST_TIMEOUT_SECONDS,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        log.debug("skopeo inspect unavailable for %s: %s", ref, exc)
+        return None
+    if result.returncode != 0:
+        log.debug("skopeo inspect failed for %s", ref)
+        return None
+    digest = result.stdout.strip()
+    return digest if digest.startswith("sha256:") else None
+
+
+def local_image_digests(ref: str) -> set[str]:
+    """Digest values recorded in the local image's ``RepoDigests``."""
+    try:
+        result = subprocess.run(
+            ["podman", "image", "inspect", ref, "--format", "{{json .RepoDigests}}"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            return set()
+        entries = json.loads(result.stdout)
+    except (subprocess.SubprocessError, OSError, json.JSONDecodeError):
+        return set()
+    return {entry.split("@", 1)[1] for entry in entries if "@" in entry}
+
+
+def images_are_current(project: Project, refs: list[str]) -> bool:
+    """True when every checkable *ref* already matches its registry digest.
+
+    Refs this script cannot resolve (``${VAR}`` tags) force a pull; refs whose
+    digest cannot be fetched also force a pull, so a broken skopeo setup
+    degrades to the old always-pull behavior rather than skipping updates.
+    """
+    for ref in refs:
+        if "${" in ref:
+            return False
+        remote = remote_image_digest(ref)
+        if remote is None:
+            return False
+        if remote not in local_image_digests(ref):
+            log.info(
+                "[%s] %s changed upstream (registry digest %s)",
+                project.name,
+                ref,
+                remote,
+            )
+            return False
+    return True
+
+
 def pull_images(config: Config, project: Project) -> None:
     cmd = _compose_args(config, project, "pull")
     log.info("[%s] pulling: %s", project.name, shlex.join(cmd))
@@ -315,11 +395,15 @@ def verify_running(project: Project) -> list[str]:
 
 
 def rollback_ref_for(ref: str) -> str | None:
-    """Return ``<image>:<tag>-ROLLBACK`` for a tag-based image reference."""
-    parts = split_image_ref(ref)
-    if parts is None:
+    """Return ``<image>:<tag>-ROLLBACK`` for a tag-based image reference.
+
+    Returns ``None`` for digest-pinned and variable-tag references: a digest
+    cannot drift on pull, and a ``${VAR}`` tag cannot be resolved without
+    compose's environment, so neither gets a rollback tag.
+    """
+    if "@" in ref or "${" in ref:
         return None
-    base, tag = parts
+    base, tag = split_image_ref(ref)
     return f"{base}:{tag}-ROLLBACK"
 
 
@@ -345,15 +429,24 @@ def tag_rollback_targets(config: Config, project: Project) -> None:
 
     Called before pulling so the previous version stays addressable by a
     stable, human-readable tag (and survives ``podman image prune``).
+    In dry-run mode the planned tags are only logged.
     """
     for ref in extract_image_refs(project.compose_file):
         rollback_ref = rollback_ref_for(ref)
         if rollback_ref is None:
-            log.debug(
-                "[%s] %s is digest-pinned; no rollback tag needed",
-                project.name,
-                ref,
-            )
+            if "${" in ref:
+                log.info(
+                    "[%s] %s uses a variable tag; skipping rollback tag "
+                    "(rollback unavailable for this project)",
+                    project.name,
+                    ref,
+                )
+            else:
+                log.debug(
+                    "[%s] %s is digest-pinned; no rollback tag needed",
+                    project.name,
+                    ref,
+                )
             continue
         try:
             if not podman_image_exists(ref):
@@ -363,11 +456,63 @@ def tag_rollback_targets(config: Config, project: Project) -> None:
                     ref,
                 )
                 continue
+            if config.dry_run:
+                log.info(
+                    "[%s] would tag rollback image %s -> %s",
+                    project.name,
+                    ref,
+                    rollback_ref,
+                )
+                continue
             podman_tag(ref, rollback_ref)
             log.debug("[%s] tagged rollback image %s", project.name, rollback_ref)
         except (RuntimeError, subprocess.SubprocessError) as exc:
             log.warning(
                 "[%s] could not tag rollback image for %s: %s", project.name, ref, exc
+            )
+
+
+def cleanup_rollback_tags(config: Config, project: Project) -> None:
+    """Remove ``<image>-ROLLBACK`` tags after a verified successful update.
+
+    Untagging lets ``podman image prune`` reclaim the superseded image. Best
+    effort: failures are logged but do not fail the update.
+    """
+    for ref in extract_image_refs(project.compose_file):
+        rollback_ref = rollback_ref_for(ref)
+        if rollback_ref is None:
+            continue
+        try:
+            if not podman_image_exists(rollback_ref):
+                continue
+            if config.dry_run:
+                log.info(
+                    "[%s] would remove rollback tag %s",
+                    project.name,
+                    rollback_ref,
+                )
+                continue
+            result = subprocess.run(
+                ["podman", "rmi", rollback_ref],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "[%s] could not remove rollback tag %s: %s",
+                    project.name,
+                    rollback_ref,
+                    result.stderr.strip(),
+                )
+                continue
+            log.debug("[%s] removed rollback tag %s", project.name, rollback_ref)
+        except (RuntimeError, subprocess.SubprocessError) as exc:
+            log.warning(
+                "[%s] could not remove rollback tag for %s: %s",
+                project.name,
+                ref,
+                exc,
             )
 
 
@@ -431,9 +576,21 @@ def handle_failed_start(config: Config, project: Project, missing: list[str]) ->
 
 
 def update_project(config: Config, project: Project) -> str:
-    """Update one project. Returns ``updated`` or ``unchanged``."""
+    """Update one project. Returns ``updated`` or ``unchanged``.
+
+    Projects listed in ``no_pull_projects`` skip the pull step: their images
+    are built locally and only change when rebuilt, in which case ``up -d``
+    recreates the containers from the new image ID.
+    """
     before = snapshot_containers(project, list_running_containers())
-    pull_images(config, project)
+    if project.name in config.no_pull_projects:
+        log.info("[%s] no_pull project; skipping pull", project.name)
+    elif config.digest_check and images_are_current(
+        project, extract_image_refs(project.compose_file)
+    ):
+        log.info("[%s] images already current; skipping pull", project.name)
+    else:
+        pull_images(config, project)
     recreate_containers(config, project)
     if config.dry_run:
         return "updated"
@@ -604,7 +761,7 @@ def run(config: Config, verbose: bool = False) -> int:
 
     for project in updatable:
         try:
-            if config.auto_rollback and not config.dry_run:
+            if config.auto_rollback:
                 tag_rollback_targets(config, project)
             status = update_project(config, project)
             if status == "updated" and not config.dry_run:
@@ -612,6 +769,8 @@ def run(config: Config, verbose: bool = False) -> int:
                 missing = verify_running(project)
                 if missing:
                     status = handle_failed_start(config, project, missing)
+                elif config.rollback_tag_cleanup:
+                    cleanup_rollback_tags(config, project)
             if status in ("failed", "rolled_back"):
                 if status == "failed":
                     stats.failed += 1

@@ -148,6 +148,9 @@ See [config.toml.example](config.toml.example) for every option:
 | `log_retention_days` | `30` | Old log cleanup window |
 | `post_update_wait_seconds` | `10` | Wait before post-update verification |
 | `auto_rollback` | `false` | Tag images pre-pull; auto-restore previous version on failed start |
+| `rollback_tag_cleanup` | `true` | Remove ROLLBACK tags after a verified successful update |
+| `no_pull_projects` | `[]` | Projects whose images are built locally; skip `pull`, recreate only |
+| `digest_check` | `true` | Skip the pull when the registry digest matches the local image (needs `skopeo`) |
 
 ## Rollback / escape hatch
 
@@ -161,8 +164,16 @@ the original tag back onto that rollback image and runs `up -d` again — the
 compose file is never modified. It then verifies the containers a second time
 and reports the project as **rolled back** (exit code non-zero, so you notice).
 
-Digest-pinned image references (`image: mongo@sha256:...`) are skipped: a
-digest cannot drift on pull, so they never need rollback.
+Digest-pinned image references (`image: mongo@sha256:...`) and variable-tag
+references (`image: localhost:5000/app:${IMAGE_TAG}`) are skipped: the script
+resolves neither without compose's environment, so rollback tagging is not
+possible for them.
+
+By default (`rollback_tag_cleanup = true`) the ROLLBACK tag is removed once an
+update is verified running, so the superseded image becomes dangling and
+cleanable by `podman image prune`. Set `rollback_tag_cleanup = false` to keep
+the tag until the next run re-tags it. Tags are always kept when an update
+fails or is rolled back.
 
 ### Manual
 
