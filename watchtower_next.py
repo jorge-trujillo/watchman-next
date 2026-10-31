@@ -505,6 +505,31 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def check_compose_provider(config: Config) -> None:
+    """Verify the compose command can locate a provider before touching anything.
+
+    ``podman compose`` is only a dispatcher; without docker-compose or
+    podman-compose on the PATH every pull/up fails with exit 125. Run the
+    cheap read-only ``version`` subcommand first so a broken environment
+    aborts the whole run instead of failing project by project.
+    """
+    cmd = [*config.compose_command, "version"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise RuntimeError(
+            f"could not run {shlex.join(cmd)}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        output = (result.stdout + result.stderr).strip()
+        raise RuntimeError(
+            f"{shlex.join(cmd)} failed with exit code {result.returncode}: {output} "
+            "(is a compose provider such as podman-compose or docker-compose "
+            "installed and on the PATH of the user running this script?)"
+        )
+    log.debug("compose provider check passed: %s", shlex.join(cmd))
+
+
 def classify_projects(
     config: Config, projects: list[Project], running: dict[str, str]
 ) -> tuple[list[Project], RunStats]:
@@ -554,6 +579,12 @@ def run(config: Config, verbose: bool = False) -> int:
         removed = prune_old_logs(config.log_dir, config.log_retention_days)
         if removed:
             log.info("pruned %d old log file(s)", removed)
+
+    try:
+        check_compose_provider(config)
+    except (RuntimeError, subprocess.SubprocessError, OSError) as exc:
+        log.error("compose provider check failed: %s", exc)
+        return EXIT_SETUP_ERROR
 
     try:
         running = list_running_containers()
