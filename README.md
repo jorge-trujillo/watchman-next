@@ -35,10 +35,15 @@ unchanged projects are untouched.
    skipped and logged; running containers not covered by any scanned project
    are reported informationally.
 5. Applies `exclude_patterns` (regex against project dir name / file path).
-6. Pulls and recreates matched projects one at a time; waits, then verifies
+6. If `auto_rollback` is enabled, tags each referenced image as
+   `<image>:<tag>-ROLLBACK` before pulling.
+7. Pulls and recreates matched projects one at a time; waits, then verifies
    the named containers are still running.
-7. Failures are isolated per project. Detailed log per run in `logs/`;
-   exit code is non-zero if anything failed.
+8. **Auto-rollback** (opt-in): if the updated project fails to start, the
+   original image tag is moved back onto the `<image>-ROLLBACK` image and the
+   project is recreated on the previous version, then verified again.
+9. Failures are isolated per project. Detailed log per run in `logs/`;
+   exit code is non-zero if anything failed **or** was rolled back.
 
 ## Usage
 
@@ -142,11 +147,27 @@ See [config.toml.example](config.toml.example) for every option:
 | `log_dir` | `logs` | Where dated run logs are written |
 | `log_retention_days` | `30` | Old log cleanup window |
 | `post_update_wait_seconds` | `10` | Wait before post-update verification |
+| `auto_rollback` | `false` | Tag images pre-pull; auto-restore previous version on failed start |
 
 ## Rollback / escape hatch
 
-The previous image stays in local storage after a pull. If an updated project
-misbehaves:
+### Automatic (opt-in, `auto_rollback = true`)
+
+Before each pull the script tags the currently-used image as
+`<image>:<tag>-ROLLBACK` (e.g. `mongo:7` → `mongo:7-ROLLBACK`), keeping the
+previous version addressable by a stable tag that survives
+`podman image prune`. If the updated project fails to start, the script moves
+the original tag back onto that rollback image and runs `up -d` again — the
+compose file is never modified. It then verifies the containers a second time
+and reports the project as **rolled back** (exit code non-zero, so you notice).
+
+Digest-pinned image references (`image: mongo@sha256:...`) are skipped: a
+digest cannot drift on pull, so they never need rollback.
+
+### Manual
+
+The previous image stays in local storage after a pull even without the
+rollback feature. If an updated project misbehaves:
 
 ```bash
 cd ~/containers/<project>

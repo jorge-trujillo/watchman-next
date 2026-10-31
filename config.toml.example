@@ -30,3 +30,9 @@ log_retention_days = 30
 # Seconds to wait after recreating a project before verifying its
 # containers are running.
 post_update_wait_seconds = 10
+
+# Before pulling, tag each project's current image as <image>:<tag>-ROLLBACK
+# (e.g. mongo:7 -> mongo:7-ROLLBACK). If the updated project fails to start,
+# the original tag is moved back onto the old image and the project is
+# recreated on the previous version automatically.
+auto_rollback = true

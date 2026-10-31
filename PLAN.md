@@ -38,6 +38,7 @@ watchtower-next/
 | `log_dir` | `./logs` | Where dated run logs are written |
 | `log_retention_days` | `30` | Older log files are deleted at start of each run |
 | `post_update_wait_seconds` | `10` | Wait before verifying containers are running after update |
+| `auto_rollback` | `false` | Tag images as `<image>:<tag>-ROLLBACK` pre-pull; on failed start, move the original tag back to the old image and recreate, then verify again |
 
 ## Per-run behavior
 
@@ -53,10 +54,12 @@ watchtower-next/
    `podman compose pull` → `podman compose up -d --remove-orphans`
    (compose is a no-op for unchanged images, so no diffing logic needed).
 7. **Verify**: after `post_update_wait_seconds`, check the project's
-   `container_name`s are still running. Record status:
-   `updated / unchanged / failed / skipped`.
+   `container_name`s are still running. With `auto_rollback`, a failed start
+   triggers re-tagging the previous image and recreating, followed by a second
+   verification. Record status:
+   `updated / unchanged / rolled back / failed / skipped`.
 8. **Isolate failures**: one project failing never stops the others. Final summary
-   logged; exit code 0 only if no failures.
+   logged; exit code 0 only if no failures or rollbacks.
 9. **Log**: detailed per-run file `logs/watchtower-next-YYYYMMDD-HHMMSS.log`;
    concise summary on stdout. Old logs pruned per retention setting.
 
@@ -92,6 +95,6 @@ systemd **user** units (rootless podman assumed):
 
 ## Non-goals (v1)
 
-Automatic rollback · push notifications (log-only) · image/container pruning ·
+Push notifications (log-only) · image/container pruning ·
 podman auto-update / quadlet integration · docker healthcheck-driven actions beyond
 the running-state check.
