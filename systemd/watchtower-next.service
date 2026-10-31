@@ -1,0 +1,8 @@
+[Unit]
+Description=watchtower-next: update podman compose projects
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/git/watchtower-next/watchtower_next.py --config %h/git/watchtower-next/config.toml

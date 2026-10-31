@@ -1,0 +1,10 @@
+[Unit]
+Description=Run watchtower-next daily
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

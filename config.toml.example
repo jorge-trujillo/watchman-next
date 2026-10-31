@@ -1,0 +1,32 @@
+# watchtower-next configuration
+# Copy to config.toml and adjust. Paths are resolved relative to this file
+# unless they are absolute. `~` is expanded.
+
+# Required: directory whose immediate subdirectories are scanned.
+# Exactly one level: BASE_DIR/<project>/<compose file>
+base_dir = "/home/jorge/containers"
+
+# Case-insensitive regex matched against filenames (grep -Ei semantics).
+# The default also matches docker-compose.yaml / docker-compose.yml.
+compose_file_regex = "compose.(yaml|yml)"
+
+# Optional: regexes matched against the project directory name or compose
+# file path. A match excludes the project from updates.
+exclude_patterns = [
+    # "mongodb",
+    # "experiments/",
+]
+
+# Command used for pull/up. "-f <compose file>" and the subcommand are
+# appended by the script; it runs with the project directory as cwd.
+compose_command = "podman compose"
+
+# Run logs are written here as watchtower-next-YYYYMMDD-HHMMSS.log
+log_dir = "logs"
+
+# Run logs older than this many days are deleted at the start of each run.
+log_retention_days = 30
+
+# Seconds to wait after recreating a project before verifying its
+# containers are running.
+post_update_wait_seconds = 10
