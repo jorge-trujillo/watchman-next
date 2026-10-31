@@ -51,19 +51,83 @@ cp config.toml.example config.toml   # then edit base_dir etc.
 
 Requires Python 3.11+ (stdlib only) and rootless `podman compose`.
 
-## Scheduling (systemd user timer)
+## Scheduled systemd task setup (cheat sheet)
+
+The timer runs the updater daily at 04:00 (+ up to 15 min random delay), as a
+**user** unit — no root needed, matching rootless podman.
+
+**Prerequisites:** `config.toml` exists and a manual `./watchtower_next.py --dry-run`
+already ran cleanly.
+
+### Install and enable
 
 ```bash
+# 1. Copy the unit files into your user systemd directory
 mkdir -p ~/.config/systemd/user
-cp systemd/watchtower-next.{service,timer} ~/.config/systemd/user/
+cp systemd/watchtower-next.service systemd/watchtower-next.timer ~/.config/systemd/user/
+
+# 2. Make systemd aware of them (required after any change to unit files)
 systemctl --user daemon-reload
+
+# 3. Enable + start the timer (starts now and on every boot)
 systemctl --user enable --now watchtower-next.timer
-loginctl enable-linger $USER   # run without an active login session
+
+# 4. Allow your user units to run while logged out (headless server)
+loginctl enable-linger $USER
+loginctl show-user $USER --property=Linger   # should print Linger=yes
 ```
 
-The timer runs daily at 04:00 with 15 minutes of random delay (`Persistent=true`
-catches up after downtime). Check with `systemctl --user list-timers` and
-`journalctl --user -u watchtower-next.service`.
+If you moved the repo somewhere other than `~/git/watchtower-next`, edit the
+`ExecStart=` path in `~/.config/systemd/user/watchtower-next.service` and run
+`daemon-reload` again.
+
+### Verify it is scheduled
+
+```bash
+systemctl --user list-timers watchtower-next.timer
+# -> shows NEXT / LEFT / LAST / PASSED columns; NEXT should be ~04:00
+```
+
+To prove the whole chain works without waiting for 04:00, run the service once
+through systemd and check its output:
+
+```bash
+systemctl --user start watchtower-next.service
+systemctl --user status watchtower-next.service     # should be inactive (dead), exit 0
+journalctl --user -u watchtower-next.service -n 50  # stdout of the last run
+```
+
+Each run also writes a detailed `logs/watchtower-next-YYYYMMDD-HHMMSS.log` file.
+
+### Change the schedule
+
+Edit `~/.config/systemd/user/watchtower-next.timer`, adjust `OnCalendar=`, then:
+
+```bash
+systemctl --user daemon-reload && systemctl --user restart watchtower-next.timer
+```
+
+`OnCalendar=` examples: `Sat *-*-* 05:00:00` (Saturdays only),
+`*-*-* 04,16:00:00` (twice daily at 04:00 and 16:00).
+
+### Disable / remove
+
+```bash
+systemctl --user disable --now watchtower-next.timer
+rm ~/.config/systemd/user/watchtower-next.{service,timer}
+systemctl --user daemon-reload
+```
+
+`loginctl disable-linger $USER` if you no longer run user units at all.
+
+### Troubleshooting
+
+- **Timer listed but never fires**: check linger (step 4 above) and that the
+  machine is on at the scheduled time — `Persistent=true` catches up a missed
+  run at the next boot.
+- **Service fails**: `journalctl --user -u watchtower-next.service` shows why
+  (most often a missing/invalid `config.toml` — remember it defaults to
+  `config.toml` next to the script).
 
 ## Configuration
 
